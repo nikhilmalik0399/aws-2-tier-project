@@ -1,6 +1,11 @@
 pipeline {
     agent any
 
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timestamps()
+    }
+
     environment {
         AWS_DEFAULT_REGION = 'us-east-1'
         AWS_ACCOUNT_ID     = '917791789598'
@@ -18,11 +23,11 @@ pipeline {
             }
         }
 
-        stage('Git Checkout') {
+        stage('Checkout Source Code') {
             steps {
                 git branch: 'main',
-                    credentialsId: 'github-cred',
-                    url: 'https://github.com/nikhilmalik0399/AWs-Eks.git'
+                credentialsId: 'github-cred',
+                url: 'https://github.com/nikhilmalik0399/AWs-Eks.git'
             }
         }
 
@@ -30,9 +35,9 @@ pipeline {
             steps {
                 withSonarQubeEnv('sonar-server') {
                     sh """
-                        ${SCANNER_HOME}/bin/sonar-scanner \\
-                            -Dsonar.projectName=app \\
-                            -Dsonar.projectKey=app
+                        ${SCANNER_HOME}/bin/sonar-scanner \
+                        -Dsonar.projectName=app \
+                        -Dsonar.projectKey=app
                     """
                 }
             }
@@ -40,141 +45,125 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar-token'
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
                 }
             }
         }
 
-        stage('OWASP Dependency-Check Scan') {
+        stage('OWASP Dependency Scan') {
             steps {
-                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit', odcInstallation: 'DP-Check'
+                dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
+                odcInstallation: 'DP-Check'
+
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
-        stage('Authenticate with AWS and ECR') {
+        stage('Authenticate to AWS ECR') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials-id']
                 ]) {
                     sh '''
-                        echo "Authenticating with AWS..."
-                        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
-                        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
-                        export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
-
                         aws sts get-caller-identity
 
-                        echo "Logging into ECR..."
                         aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
-                        docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+                        docker login --username AWS --password-stdin \
+                        ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
                     '''
                 }
             }
         }
 
-        stage('Build, Tag & Push Frontend Docker Image to AWS ECR') {
-            steps {
-                dir('frontend') {
-                    sh """
-                        echo "Building Frontend Docker image..."
-                        docker build -t frontend:latest .
+        stage('Build and Push Docker Images') {
 
-                        echo "Tagging image with ${IMAGE_TAG} and latest..."
-                        docker tag frontend:latest ${FRONTEND_ECR_URI}:${IMAGE_TAG}
-                        docker tag frontend:latest ${FRONTEND_ECR_URI}:latest
+            parallel {
 
-                        echo "Pushing images to ECR..."
-                        docker push ${FRONTEND_ECR_URI}:${IMAGE_TAG}
-                        docker push ${FRONTEND_ECR_URI}:latest
-                        sleep 5
-                    """
+                stage('Frontend Build & Push') {
+                    steps {
+                        dir('frontend') {
+                            sh '''
+                                echo "Building Frontend Image..."
+                                docker build -t ${FRONTEND_ECR_URI}:${IMAGE_TAG} .
+
+                                docker push ${FRONTEND_ECR_URI}:${IMAGE_TAG}
+
+                                trivy image --severity HIGH,CRITICAL --exit-code 1 ${FRONTEND_ECR_URI}:${IMAGE_TAG}
+                            '''
+                        }
+                    }
+                }
+
+                stage('Backend Build & Push') {
+                    steps {
+                        dir('backend') {
+                            sh '''
+                                echo "Building Backend Image..."
+                                docker build -t ${BACKEND_ECR_URI}:${IMAGE_TAG} .
+
+                                docker push ${BACKEND_ECR_URI}:${IMAGE_TAG}
+
+                                trivy image --severity HIGH,CRITICAL --exit-code 1 ${BACKEND_ECR_URI}:${IMAGE_TAG}
+                            '''
+                        }
+                    }
                 }
             }
         }
 
-        stage('Scan Latest Frontend Docker Image using Trivy') {
-            steps {
-                sh "trivy image ${FRONTEND_ECR_URI}:${IMAGE_TAG}"
-            }
-        }
-
-        stage('Build, Tag & Push Backend Docker Image to AWS ECR') {
-            steps {
-                dir('backend') {
-                    sh """
-                        echo "Building Backend Docker image..."
-                        docker build -t backend:latest .
-
-                        echo "Tagging image with ${IMAGE_TAG} and latest..."
-                        docker tag backend:latest ${BACKEND_ECR_URI}:${IMAGE_TAG}
-                        docker tag backend:latest ${BACKEND_ECR_URI}:latest
-
-                        echo "Pushing images to ECR..."
-                        docker push ${BACKEND_ECR_URI}:${IMAGE_TAG}
-                        docker push ${BACKEND_ECR_URI}:latest
-                        sleep 5
-                    """
-                }
-            }
-        }
-
-        stage('Scan Latest Backend Docker Image using Trivy') {
-            steps {
-                sh "trivy image ${BACKEND_ECR_URI}:${IMAGE_TAG}"
-            }
-        }
-
-        stage('Clean Workspace for CD Repo') {
+        stage('Prepare CD Repo') {
             steps {
                 cleanWs()
-            }
-        }
 
-        stage('Clone Helm Chart for CD') {
-            steps {
                 git branch: 'main',
-                    credentialsId: 'github-cred',
-                    url: 'https://github.com/nikhilmalik0399/Helm-Charts-AWs-Teir-Appln-.git'
+                credentialsId: 'github-cred',
+                url: 'https://github.com/nikhilmalik0399/Helm-Charts-AWs-Teir-Appln-.git'
             }
         }
 
-        stage('Update helm values.yaml with New Docker Image') {
+        stage('Update Helm Values') {
+
             environment {
                 GIT_REPO_NAME = "Helm-Charts-AWs-Teir-Appln"
                 GIT_USER_NAME = "nikhilmalik0399"
             }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'github-cred',
-                    usernameVariable: 'GIT_USERNAME',
-                    passwordVariable: 'GIT_PASSWORD'
-                )]) {
-                    sh """
-                        set -e
 
+            steps {
+
+                withCredentials([usernamePassword(
+                        credentialsId: 'github-cred',
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_PASSWORD'
+                )]) {
+
+                    sh '''
                         git config user.email "nikhilmalik0399@gmail.com"
                         git config user.name "${GIT_USER_NAME}"
 
-                        echo "=== BEFORE ==="
-                        cat helm-chart/values.yaml
+                        echo "Updating Helm values.yaml"
 
-                       sed -i "s|image: .*frontend-repo:.*|image: ${FRONTEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
-                       sed -i "s|image: .*backend-repo:.*|image: ${BACKEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
+                        sed -i "s|image: .*frontend-repo:.*|image: ${FRONTEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
+                        sed -i "s|image: .*backend-repo:.*|image: ${BACKEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
 
-                        echo "=== AFTER ==="
-                        cat helm-chart/values.yaml
+                        git add helm-chart/values.yaml
 
-                        if git diff --quiet; then
-                            echo "No changes to commit. Skipping commit."
+                        if git diff --cached --quiet; then
+                            echo "No changes detected"
                         else
-                            git add helm-chart/values.yaml
-                            git commit -m "Updated helm values.yaml to version ${IMAGE_TAG}"
+                            git commit -m "Update image version to ${IMAGE_TAG}"
                             git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:main
                         fi
-                    """
+                    '''
                 }
+            }
+        }
+
+        stage('Cleanup Docker Images') {
+            steps {
+                sh '''
+                    docker system prune -af
+                '''
             }
         }
     }
