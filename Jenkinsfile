@@ -11,8 +11,9 @@ pipeline {
         AWS_ACCOUNT_ID     = '917791789598'
         IMAGE_TAG          = "1.0.${BUILD_NUMBER}"
         SCANNER_HOME       = tool 'sonar-scanner'
-        FRONTEND_ECR_URI   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/frontend-repo"
-        BACKEND_ECR_URI    = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/backend-repo"
+
+        FRONTEND_ECR_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/frontend-repo"
+        BACKEND_ECR_URI  = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/backend-repo"
     }
 
     stages {
@@ -23,7 +24,7 @@ pipeline {
             }
         }
 
-        stage('Checkout Source Code') {
+        stage('Checkout Application Code') {
             steps {
                 git branch: 'main',
                 credentialsId: 'github-cred',
@@ -60,14 +61,16 @@ pipeline {
             }
         }
 
-        stage('Authenticate to AWS ECR') {
+        stage('Authenticate with AWS ECR') {
             steps {
                 withCredentials([
                     [$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials-id']
                 ]) {
                     sh '''
+                        echo "Authenticating AWS..."
                         aws sts get-caller-identity
 
+                        echo "Logging into ECR..."
                         aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
                         docker login --username AWS --password-stdin \
                         ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
@@ -85,9 +88,12 @@ pipeline {
                         dir('frontend') {
                             sh '''
                                 echo "Building Frontend Image..."
+
                                 docker build -t ${FRONTEND_ECR_URI}:${IMAGE_TAG} .
 
                                 docker push ${FRONTEND_ECR_URI}:${IMAGE_TAG}
+
+                                echo "Running Trivy Scan..."
 
                                 trivy image --severity HIGH,CRITICAL --exit-code 1 ${FRONTEND_ECR_URI}:${IMAGE_TAG}
                             '''
@@ -100,9 +106,12 @@ pipeline {
                         dir('backend') {
                             sh '''
                                 echo "Building Backend Image..."
+
                                 docker build -t ${BACKEND_ECR_URI}:${IMAGE_TAG} .
 
                                 docker push ${BACKEND_ECR_URI}:${IMAGE_TAG}
+
+                                echo "Running Trivy Scan..."
 
                                 trivy image --severity HIGH,CRITICAL --exit-code 1 ${BACKEND_ECR_URI}:${IMAGE_TAG}
                             '''
@@ -112,7 +121,7 @@ pipeline {
             }
         }
 
-        stage('Prepare CD Repo') {
+        stage('Prepare Helm CD Repo') {
             steps {
                 cleanWs()
 
@@ -122,19 +131,19 @@ pipeline {
             }
         }
 
-        stage('Update Helm Values') {
+        stage('Update Helm values.yaml') {
 
             environment {
-                GIT_REPO_NAME = "Helm-Charts-AWs-Teir-Appln"
+                GIT_REPO_NAME = "Helm-Charts-AWs-Teir-Appln-"
                 GIT_USER_NAME = "nikhilmalik0399"
             }
 
             steps {
 
                 withCredentials([usernamePassword(
-                        credentialsId: 'github-cred',
+                        credentialsId: 'github-token',
                         usernameVariable: 'GIT_USERNAME',
-                        passwordVariable: 'GIT_PASSWORD'
+                        passwordVariable: 'GIT_TOKEN'
                 )]) {
 
                     sh '''
@@ -146,13 +155,17 @@ pipeline {
                         sed -i "s|image: .*frontend-repo:.*|image: ${FRONTEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
                         sed -i "s|image: .*backend-repo:.*|image: ${BACKEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
 
+                        echo "Updated values.yaml:"
+                        cat helm-chart/values.yaml
+
                         git add helm-chart/values.yaml
 
                         if git diff --cached --quiet; then
-                            echo "No changes detected"
+                            echo "No changes detected. Skipping commit."
                         else
                             git commit -m "Update image version to ${IMAGE_TAG}"
-                            git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:main
+
+                            git push https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/${GIT_USER_NAME}/${GIT_REPO_NAME}.git HEAD:main
                         fi
                     '''
                 }
@@ -162,6 +175,7 @@ pipeline {
         stage('Cleanup Docker Images') {
             steps {
                 sh '''
+                    echo "Cleaning Docker images..."
                     docker system prune -af
                 '''
             }
