@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         AWS_DEFAULT_REGION = 'us-east-1'
-        AWS_ACCOUNT_ID     = '657001761946'
+        AWS_ACCOUNT_ID     = '917791789598'
         IMAGE_TAG          = "1.0.${BUILD_NUMBER}"
         SCANNER_HOME       = tool 'sonar-scanner'
         FRONTEND_ECR_URI   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/frontend-repo"
@@ -22,7 +22,7 @@ pipeline {
             steps {
                 git branch: 'main',
                     credentialsId: 'github-cred',
-                    url: 'https://github.com/vijaygiduthuri/aws-2-tier-project.git'
+                    url: 'https://github.com/nikhilmalik0399/AWs-Eks.git'
             }
         }
 
