@@ -160,8 +160,8 @@ pipeline {
                         echo "=== BEFORE ==="
                         cat helm-chart/values.yaml
 
-                        sed -i "s|image: 657001761946.dkr.ecr.us-east-1.amazonaws.com/frontend-repo:.*|image: 657001761946.dkr.ecr.us-east-1.amazonaws.com/frontend-repo:${IMAGE_TAG}|" helm-chart/values.yaml
-                        sed -i "s|image: 657001761946.dkr.ecr.us-east-1.amazonaws.com/backend-repo:.*|image: 657001761946.dkr.ecr.us-east-1.amazonaws.com/backend-repo:${IMAGE_TAG}|" helm-chart/values.yaml
+                       sed -i "s|image: .*frontend-repo:.*|image: ${FRONTEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
+                       sed -i "s|image: .*backend-repo:.*|image: ${BACKEND_ECR_URI}:${IMAGE_TAG}|" helm-chart/values.yaml
 
                         echo "=== AFTER ==="
                         cat helm-chart/values.yaml
